@@ -11,7 +11,7 @@ const MemInfo = struct {
 
 pub fn getMemInfo() !MemInfo {
     var line_buf: [1024]u8 = undefined;
-    
+
     var meminfo_handle = try std.fs.openFileAbsolute("/proc/meminfo", .{});
     defer meminfo_handle.close();
 
@@ -24,24 +24,30 @@ pub fn getMemInfo() !MemInfo {
         var value = try std.fmt.parseUnsigned(usize, value_str, 10);
         // meminfo is in kB
         value *= 1024;
-        if (std.mem.eql(u8, entry, "MemTotal:")) meminfo.total = value
-        else if (std.mem.eql(u8, entry, "MemFree:")) meminfo.free = value
-        else if (std.mem.eql(u8, entry, "MemAvailable:")) meminfo.available = value
-        else if (std.mem.eql(u8, entry, "Cached:")) meminfo.cached = value
-        else if (std.mem.eql(u8, entry, "SwapTotal:")) meminfo.swap_total = value
-        else if (std.mem.eql(u8, entry, "SwapFree:")) meminfo.swap_free = value;
+        if (std.mem.eql(u8, entry, "MemTotal:")) {
+            meminfo.total = value;
+        } else if (std.mem.eql(u8, entry, "MemFree:")) {
+            meminfo.free = value;
+        } else if (std.mem.eql(u8, entry, "MemAvailable:")) {
+            meminfo.available = value;
+        } else if (std.mem.eql(u8, entry, "Cached:")) {
+            meminfo.cached = value;
+        } else if (std.mem.eql(u8, entry, "SwapTotal:")) {
+            meminfo.swap_total = value;
+        } else if (std.mem.eql(u8, entry, "SwapFree:")) {
+            meminfo.swap_free = value;
+        }
     }
     return meminfo;
 }
-
 
 const GinkgoGroup = struct {
     const cgroup_fs = "/sys/fs/cgroup";
 
     oom_control: bool = true,
     swappiness: u8 = 0,
-    swap_limit: u8 = 0,
-    memory_limit: u8,
+    swap_limit: usize = 0,
+    memory_limit: usize,
 
     cgroup_name: []const u8,
     cgroup_path: []const u8,
@@ -49,9 +55,9 @@ const GinkgoGroup = struct {
 
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, memory_limit: u8) !GinkgoGroup {
+    pub fn init(allocator: std.mem.Allocator, memory_limit: usize) !GinkgoGroup {
         const this_pid = std.os.system.getpid();
-        const cgroup_name = try std.fmt.allocPrint(allocator, "ginkgo_{}", .{ this_pid });
+        const cgroup_name = try std.fmt.allocPrint(allocator, "ginkgo_{}", .{this_pid});
         errdefer allocator.free(cgroup_name);
         const cgroup_path = try std.fmt.allocPrint(
             allocator,
@@ -60,11 +66,7 @@ const GinkgoGroup = struct {
         );
         errdefer allocator.free(cgroup_path);
 
-        const controller_path = try std.fmt.allocPrint(
-            allocator,
-            "memory:ginkgo/{s}",
-            .{cgroup_name}
-        );
+        const controller_path = try std.fmt.allocPrint(allocator, "memory:ginkgo/{s}", .{cgroup_name});
         errdefer allocator.free(controller_path);
 
         return .{
@@ -83,7 +85,7 @@ const GinkgoGroup = struct {
     }
 
     pub fn create(self: GinkgoGroup) !void {
-        var args: [3][]const u8 = .{"cgcreate", "-g", self.controller_path};
+        var args: [3][]const u8 = .{ "cgcreate", "-g", self.controller_path };
 
         var proc = std.ChildProcess.init(&args, self.allocator);
         var ret = try proc.spawnAndWait();
@@ -94,9 +96,9 @@ const GinkgoGroup = struct {
             else => return error.CgroupCreateFailed,
         }
     }
-    
+
     pub fn delete(self: GinkgoGroup) !void {
-        var args: [2][]const u8 = .{"cgdelete", self.controller_path};
+        var args: [2][]const u8 = .{ "cgdelete", self.controller_path };
 
         var proc = std.ChildProcess.init(&args, self.allocator);
         var ret = try proc.spawnAndWait();
@@ -114,23 +116,23 @@ const GinkgoGroup = struct {
         var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
         const allocator = buf_allocator.allocator();
 
-        var path = try std.mem.join(allocator, "/", &.{self.cgroup_path, control_file});
+        var path = try std.mem.join(allocator, "/", &.{ self.cgroup_path, control_file });
         std.debug.print("{s}\n", .{path});
         var handle = try std.fs.openFileAbsolute(path, .{});
         defer handle.close();
 
         // ignore the trailing byte (\n)
-        var num_bytes = try handle.readAll(&buffer)-1;
+        var num_bytes = try handle.readAll(&buffer) - 1;
         return try std.fmt.parseUnsigned(usize, buffer[0..num_bytes], 10);
     }
-    
+
     pub fn setCgroupValue(self: GinkgoGroup, control_file: []const u8, value: usize) !void {
         var buffer: [256]u8 = undefined;
         var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
         const allocator = buf_allocator.allocator();
 
-        var path = try std.mem.join(allocator, "/", &.{self.cgroup_path, control_file});
-        var handle = try std.fs.openFileAbsolute(path, .{.mode=.write_only});
+        var path = try std.mem.join(allocator, "/", &.{ self.cgroup_path, control_file });
+        var handle = try std.fs.openFileAbsolute(path, .{ .mode = .write_only });
         defer handle.close();
 
         var value_str = try std.fmt.bufPrint(&buffer, "{}", .{value});
@@ -139,12 +141,76 @@ const GinkgoGroup = struct {
     }
 };
 
-pub fn runCgroup(allocator: std.mem.Allocator, byte_limit: usize, args: [][]const u8) !void {
+pub fn oomControl(cgroup: *const GinkgoGroup) !void {
+    var event_ctrl_buffer: [256]u8 = undefined;
+    var oom_ctrl_buffer: [256]u8 = undefined;
 
-    var ginkgo_group = try GinkgoGroup.init(allocator, 2);
+    const event_ctrl_path = try std.fmt.bufPrint(
+        &event_ctrl_buffer,
+        "{s}/{s}",
+        .{ cgroup.cgroup_path, "cgroup.event_control" },
+    );
+    const oom_ctrl_path = try std.fmt.bufPrint(
+        &oom_ctrl_buffer,
+        "{s}/{s}",
+        .{ cgroup.cgroup_path, "memory.oom_control" },
+    );
+
+    var event_ctrl_fd = try std.fs.openFileAbsolute(event_ctrl_path, .{ .mode = .write_only });
+    defer event_ctrl_fd.close();
+
+    var oom_ctrl_fd = try std.fs.openFileAbsolute(oom_ctrl_path, .{ .mode = .read_only });
+    defer oom_ctrl_fd.close();
+
+    const efd = try std.os.eventfd(0, 0);
+
+    var line_buffer = [_]u8{0} ** 128;
+    var line = try std.fmt.bufPrint(&line_buffer, "{d} {d}\x00", .{ efd, oom_ctrl_fd.handle });
+    _ = try event_ctrl_fd.write(line);
+
+    var current_limit = try cgroup.getCgroupValue("memory.limit_in_bytes");
+
+    var result_buf: [@sizeOf(u64)]u8 = undefined;
+    const inc = 1024 * 1024 * 1024 * 2;
+    while (true) {
+        var ret = try std.os.read(efd, &result_buf);
+        std.debug.assert(ret == @sizeOf(@TypeOf(result_buf)));
+
+        std.fs.accessAbsolute(event_ctrl_path, .{ .mode = .write_only }) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print("cgroup deleted\n", .{});
+                break;
+            },
+            else => {
+                std.debug.print("cgroup not accessible\n", .{});
+                return;
+            },
+        };
+
+        std.debug.print("OOM Event Triggered\n", .{});
+        if (current_limit < cgroup.memory_limit) {
+            current_limit = @min(current_limit + inc, cgroup.memory_limit);
+            // When increasing, memsw has to go first.
+            try cgroup.setCgroupValue("memory.memsw.limit_in_bytes", current_limit);
+            try cgroup.setCgroupValue("memory.limit_in_bytes", current_limit);
+        } else {
+            std.debug.print("Halting\n", .{});
+        }
+    }
+}
+
+pub fn runCgroup(allocator: std.mem.Allocator, byte_limit: usize, args: [][]const u8) !void {
+    var ginkgo_group = try GinkgoGroup.init(allocator, byte_limit);
     defer ginkgo_group.deinit();
 
     try ginkgo_group.create();
+
+    // TODO: This is dangerous, the only way for this thread to end is if the
+    // cgroup is deleted which makes order matter. Better to store state in
+    // the GinkgoGroup
+    var oom_ctrl_thread = try std.Thread.spawn(.{}, oomControl, .{&ginkgo_group});
+    defer oom_ctrl_thread.join();
+
     defer ginkgo_group.delete() catch {
         std.debug.print(
             "failed to delete cgroup: {s}\n",
@@ -152,9 +218,12 @@ pub fn runCgroup(allocator: std.mem.Allocator, byte_limit: usize, args: [][]cons
         );
     };
 
+    // 4GB
+    const start_limit = 1024 * 1024 * 1024 * 4;
+
     //try ginkgo_group.setCgroupValue("memory.swappiness", 0);
-    try ginkgo_group.setCgroupValue("memory.limit_in_bytes", byte_limit);
-    try ginkgo_group.setCgroupValue("memory.memsw.limit_in_bytes", byte_limit);
+    try ginkgo_group.setCgroupValue("memory.limit_in_bytes", start_limit);
+    try ginkgo_group.setCgroupValue("memory.memsw.limit_in_bytes", start_limit);
     try ginkgo_group.setCgroupValue("memory.oom_control", 1);
 
     var cgexec_args = try allocator.alloc([]const u8, args.len + 3);
@@ -188,7 +257,7 @@ pub fn main() !void {
     defer std.process.argsFree(allocator, args);
 
     const meminfo = try getMemInfo();
-    
+
     var cgroup_cmd = args[1..];
 
     var byte_limit = meminfo.total;
@@ -197,10 +266,9 @@ pub fn main() !void {
             std.debug.print("Invalid option '{s}' for -g\n", .{args[2]});
             return;
         };
-        byte_limit *= 1024*1024*1024;
+        byte_limit *= 1024 * 1024 * 1024;
         cgroup_cmd = args[3..];
     }
 
     try runCgroup(allocator, byte_limit, cgroup_cmd);
-
 }
