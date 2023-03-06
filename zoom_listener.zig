@@ -16,6 +16,7 @@ pub fn main() !void {
     defer oom_ctrl_fd.close();
 
     const efd = try std.os.eventfd(0, 0);
+    defer std.os.close(efd);
 
     var buf = [_]u8{0} ** 128;
     var line = try std.fmt.bufPrint(&buf, "{d} {d}\x00", .{ efd, oom_ctrl_fd.handle });
