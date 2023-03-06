@@ -3,7 +3,7 @@ const GinkgoGroup = @import("GinkgoGroup.zig");
 
 const ui = @import("ui.zig");
 
-pub fn oomMonitor(cgroup: *const GinkgoGroup) !void {
+pub fn oomMonitor(cgroup: *const GinkgoGroup, pid: *const ?std.os.pid_t) !void {
 
     ui.initUI();
 
@@ -51,6 +51,23 @@ pub fn oomMonitor(cgroup: *const GinkgoGroup) !void {
         };
 
         std.debug.print("OOM Event Triggered\n", .{});
-        ui.promptUI();
+        switch (ui.promptUI()) {
+            .ignore => continue,
+            .kill => {
+                if (pid.*) |p| try std.os.kill(p, 9);
+                break;
+            },
+            .kill_save => {
+                if (pid.*) |p| try std.os.kill(p, 11);
+                // provide some RAM to terminate
+                break;
+            },
+            .swap => {
+                continue;
+            },
+            .swap_all => {
+                continue;
+            },
+        }
     }
 }

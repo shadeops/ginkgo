@@ -110,7 +110,7 @@ fn cgroupMemLimiter(
     std.debug.print("cgroupMemLimiter stopped\n", .{});
 }
 
-pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, args: [][]const u8) !u8 {
+pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, active: bool, args: [][]const u8) !u8 {
     var ginkgo_group = try GinkgoGroup.init(allocator);
     defer ginkgo_group.deinit();
 
@@ -128,12 +128,16 @@ pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, args: [
     try ginkgo_group.setCgroupValue("memory.oom_control", 1);
     try ginkgo_group.setCgroupValue("memory.swappiness", 0);
 
-    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{&ginkgo_group});
-    var cgroup_limiter_thread = try std.Thread.spawn(
-        .{},
-        cgroupMemLimiter,
-        .{ &ginkgo_group, user_limits, 500 },
-    );
+    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{&ginkgo_group, &child_pid});
+    
+    var cgroup_limiter_thread: ?std.Thread = null;
+    if (active) {
+        cgroup_limiter_thread = try std.Thread.spawn(
+            .{},
+            cgroupMemLimiter,
+            .{ &ginkgo_group, user_limits, 500 },
+        );
+    }
 
     var cgexec_args = try allocator.alloc([]const u8, args.len + 3);
     defer allocator.free(cgexec_args);
@@ -181,8 +185,11 @@ pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, args: [
             .{ginkgo_group.controller_path},
         );
     };
+
     oom_ctrl_thread.join();
-    cgroup_limiter_thread.join();
+    if (cgroup_limiter_thread) |thread| {
+        thread.join();
+    }
 
     return ret_code;
 }
@@ -201,19 +208,27 @@ pub fn main() !u8 {
 
     const meminfo = try MemInfo.getMemInfo();
     var byte_limit = meminfo.total - one_gig;
-
-    if (args.len > 3 and std.mem.eql(u8, args[1], "-g")) {
-        byte_limit = std.fmt.parseUnsigned(usize, args[2], 10) catch {
-            std.debug.print("Invalid option '{s}' for -g\n", .{args[2]});
-            return 1;
-        };
-        byte_limit *= one_gig;
-        cgroup_cmd = args[3..];
+    var active = false;
+    
+    while (true) {
+        if (std.mem.eql(u8, cgroup_cmd[0], "-g")) {
+            byte_limit = std.fmt.parseUnsigned(usize, cgroup_cmd[1], 10) catch {
+                std.debug.print("Invalid option '{s}' for -g\n", .{cgroup_cmd[1]});
+                return 1;
+            };
+            byte_limit *= one_gig;
+            cgroup_cmd = cgroup_cmd[2..];
+        } else if (std.mem.eql(u8, cgroup_cmd[0], "-a")) {
+            active = true;
+            cgroup_cmd = cgroup_cmd[1..];
+        } else {
+            break;
+        }
     }
 
     var user_limits = MemorySize{ .rss = byte_limit, .swap = 0 };
 
-    var ret = try runCgroup(allocator, &user_limits, cgroup_cmd);
+    var ret = try runCgroup(allocator, &user_limits, active, cgroup_cmd);
     return ret;
 }
 

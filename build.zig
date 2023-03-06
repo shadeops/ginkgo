@@ -49,6 +49,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.expected_term = null;
 
     if (b.args) |args| {
         run_cmd.addArgs(args);

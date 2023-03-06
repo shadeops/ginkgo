@@ -21,6 +21,14 @@ const warning_txt =
     \\Please select an option on how to proceed.
 ;
 
+const Action = enum {
+    kill,
+    kill_save,
+    swap,
+    swap_all,
+    ignore,
+};
+
 pub fn initUI() void {
     ray.SetTraceLogLevel(0);
     ray.SetConfigFlags(ray.FLAG_WINDOW_HIDDEN);
@@ -29,7 +37,7 @@ pub fn initUI() void {
     //GuiLoadStyleDark();
 }
 
-pub fn promptUI() void {
+pub fn promptUI() Action {
     ray.ClearWindowState(ray.FLAG_WINDOW_HIDDEN);
     ray.SetWindowState(ray.FLAG_WINDOW_TOPMOST);
     defer ray.ClearWindowState(ray.FLAG_WINDOW_TOPMOST);
@@ -111,6 +119,10 @@ pub fn promptUI() void {
 
         ray.GuiLabel(c_also_lbl, "Alternatively, you may close other processes in order to free up RAM.\nDoing so will unfreeze your process.");
 
-        if (kill or kill_save or swap or swap_all) break;
+        if (kill) return .kill;
+        if (kill_save) return .kill_save;
+        if (swap) return .swap;
+        if (swap_all) return .swap_all;
     }
+    return .ignore;
 }
