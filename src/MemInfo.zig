@@ -48,26 +48,3 @@ pub fn getMemInfo() !MemInfo {
 pub fn update(self: *MemInfo) !void {
     self.* = try getMemInfo();
 }
-
-//pub fn update(self: *MemInfo) !void {
-//    var mutex = std.Mutex{};
-//    // lock while updating, if we'd block, don't bother
-//    // assumes low contention
-//    if (mutex.tryLock() {
-//        defer mutex.unlock();
-//        self.* = try getMemInfo();
-//    }
-//}
-//
-//fn updateLoop(self: *MemInfo, ms: usize) !void {
-//    while (true) {
-//        self.update();
-//        std.time.sleep(std.time.ns_per_ms * ms);
-//    }
-//}
-//
-//pub fn spawnUpdateThread(self: *MemInfo, ms: usize) !std.Thread {
-//    var thread = try std.Thread.spawn(.{}, self.updateLoop, .{self, ms});
-//    thread.detach();
-//    return thread;
-//}

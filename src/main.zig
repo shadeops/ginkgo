@@ -6,7 +6,7 @@ const MemInfo = @import("MemInfo.zig");
 
 const one_gig = 1024 * 1024 * 1024;
 
-var child_pid: ?std.os.pid_t = null;
+pub var child_pid: ?std.os.pid_t = null;
 
 // Note: If we Ctrl+C in the shell, it sends a SIGINT to the entire process group.
 //  meaning our child process is interrupted and our cgroup is cleaned up, however
@@ -19,13 +19,13 @@ const handled_signals = [_]c_int{
 pub fn sig_handler(sig: c_int) align(1) callconv(.C) void {
     if (child_pid) |pid| {
         std.os.kill(pid, @intCast(u8, sig)) catch {
-            std.debug.print("Failed to kill child process [{}]\n", .{pid});
+            std.log.warn("Failed to kill child process [{}].", .{pid});
         };
-        std.debug.print("Murdered {}\n", .{pid});
+        std.log.info("Pid {} has been killed with signal {}.", .{pid, @intCast(u8, sig)});
     }
 }
 
-const MemorySize = struct {
+pub const MemorySize = struct {
     rss: usize,
     swap: usize,
 
@@ -34,11 +34,18 @@ const MemorySize = struct {
     }
 };
 
+pub const Context = struct {
+    cgroup: *const GinkgoGroup,
+    mutex: *std.Thread.Mutex,
+    condition: *std.Thread.Condition,
+    limits: MemorySize,
+    done: bool = false,
+};
+
 fn computeLimits(
-    allowed_limits: *const MemorySize,
-    cgroup_limits: MemorySize,
+    allowed_limits: MemorySize,
     current_usage: MemorySize,
-) !?MemorySize {
+) !MemorySize {
     const meminfo = try MemInfo.getMemInfo();
 
     var rss_limit_headroom = (allowed_limits.rss -| current_usage.rss);
@@ -49,40 +56,63 @@ fn computeLimits(
     var swap_for_process = current_usage.swap + @min(swap_limit_headroom, meminfo.swap_free);
     var swap = @max(current_usage.swap, swap_for_process);
 
-    if (rss == cgroup_limits.rss and swap == cgroup_limits.swap) return null;
     return .{ .rss = rss, .swap = swap };
 }
 
 fn cgroupMemLimiter(
-    cgroup: *const GinkgoGroup,
-    user_limits: *const MemorySize,
-    update_freq_ms: usize,
+    ctx: *const Context,
+    update_freq_ms: ?usize,
 ) !void {
 
-    while (true) {
+    var swappiness = ctx.limits.swap > 0;
+
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+
+    while (!ctx.done) {
+
+        if (update_freq_ms) |timeout| {
+            ctx.condition.timedWait(ctx.mutex, timeout*std.time.ns_per_ms) catch {};
+        } else {
+            ctx.condition.wait(ctx.mutex);
+        }
+
         // If we can't access the Cgroup it must be gone and can exit the loop.
-        var mem_limit = cgroup.getCgroupValue("memory.limit_in_bytes") catch break;
-        var memsw_limit = cgroup.getCgroupValue("memory.memsw.limit_in_bytes") catch break;
+        var mem_limit = ctx.cgroup.getCgroupValue("memory.limit_in_bytes") catch break;
+        var memsw_limit = ctx.cgroup.getCgroupValue("memory.memsw.limit_in_bytes") catch break;
         var swap_allowance = memsw_limit -| mem_limit;
         const cgroup_limits = MemorySize{ .rss = mem_limit, .swap = swap_allowance };
 
         // this may be somewhat inaccurate, possibly use memory.stat or /proc/self/status
-        var mem_usage = cgroup.getCgroupValue("memory.usage_in_bytes") catch break;
-        var memsw_usage = cgroup.getCgroupValue("memory.memsw.usage_in_bytes") catch break;
+        var mem_usage = ctx.cgroup.getCgroupValue("memory.usage_in_bytes") catch break;
+        var memsw_usage = ctx.cgroup.getCgroupValue("memory.memsw.usage_in_bytes") catch break;
         var swap_usage = memsw_usage -| mem_usage;
         const cgroup_usage = MemorySize{ .rss = mem_usage, .swap = swap_usage };
 
-        var new_limit = try computeLimits(user_limits, cgroup_limits, cgroup_usage) orelse continue;
+        var new_limit = try computeLimits(ctx.limits, cgroup_usage);
+
+        var new_swappiness = ctx.limits.swap > 0;
+        defer swappiness = new_swappiness;
+        if (new_swappiness != swappiness) {
+            if (new_swappiness) {
+                try ctx.cgroup.setCgroupValue("memory.swappiness", 60);
+            } else {
+                try ctx.cgroup.setCgroupValue("memory.swappiness", 0);
+            }
+        }
+
+        var limit_diff = @intCast(i64, new_limit.total()) - @intCast(i64, cgroup_limits.total());
+        if (try std.math.absInt(limit_diff) < one_gig) continue;
 
         if (new_limit.total() < memsw_limit) {
-            cgroup.setCgroupValue(
+            ctx.cgroup.setCgroupValue(
                 "memory.limit_in_bytes",
                 new_limit.rss,
             ) catch |err| switch (err) {
                 error.DeviceBusy => continue,
                 else => break,
             };
-            cgroup.setCgroupValue(
+            ctx.cgroup.setCgroupValue(
                 "memory.memsw.limit_in_bytes",
                 new_limit.total(),
             ) catch |err| switch (err) {
@@ -90,14 +120,14 @@ fn cgroupMemLimiter(
                 else => break,
             };
         } else {
-            cgroup.setCgroupValue(
+            ctx.cgroup.setCgroupValue(
                 "memory.memsw.limit_in_bytes",
                 new_limit.total(),
             ) catch |err| switch (err) {
                 error.DeviceBusy => continue,
                 else => break,
             };
-            cgroup.setCgroupValue(
+            ctx.cgroup.setCgroupValue(
                 "memory.limit_in_bytes",
                 new_limit.rss,
             ) catch |err| switch (err) {
@@ -105,39 +135,40 @@ fn cgroupMemLimiter(
                 else => break,
             };
         }
-        std.time.sleep(std.time.ns_per_ms * update_freq_ms);
     }
-    std.debug.print("cgroupMemLimiter stopped\n", .{});
+    std.log.debug("cgroupMemLimiter thread has stopped.", .{});
 }
 
-pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, active: bool, args: [][]const u8) !u8 {
+pub fn runCgroup(allocator: std.mem.Allocator, user_limits: MemorySize, update_ms: ?u64, args: [][]const u8) !u8 {
     var ginkgo_group = try GinkgoGroup.init(allocator);
     defer ginkgo_group.deinit();
 
     try ginkgo_group.create();
     errdefer ginkgo_group.delete() catch {
-        std.debug.print(
-            "failed to delete cgroup: {s}\n",
+        std.log.warn(
+            "Failed to delete cgroup: {s}.",
             .{ginkgo_group.controller_path},
         );
     };
 
+    var mutex = std.Thread.Mutex{};
+    var condition = std.Thread.Condition{};
+
+    var ctx = Context{
+        .cgroup = &ginkgo_group,
+        .mutex = &mutex,
+        .condition = &condition,
+        .limits = user_limits,
+    };
+
     // Since we are shrinking from the max defaults, memory goes before memsw
-    try ginkgo_group.setCgroupValue("memory.limit_in_bytes", user_limits.rss);
-    try ginkgo_group.setCgroupValue("memory.memsw.limit_in_bytes", user_limits.total());
+    try ginkgo_group.setCgroupValue("memory.limit_in_bytes", ctx.limits.rss);
+    try ginkgo_group.setCgroupValue("memory.memsw.limit_in_bytes", ctx.limits.total());
     try ginkgo_group.setCgroupValue("memory.oom_control", 1);
     try ginkgo_group.setCgroupValue("memory.swappiness", 0);
 
-    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{&ginkgo_group, &child_pid});
-    
-    var cgroup_limiter_thread: ?std.Thread = null;
-    if (active) {
-        cgroup_limiter_thread = try std.Thread.spawn(
-            .{},
-            cgroupMemLimiter,
-            .{ &ginkgo_group, user_limits, 500 },
-        );
-    }
+    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{ &ctx });
+    var cgroup_limiter_thread = try std.Thread.spawn(.{}, cgroupMemLimiter, .{ &ctx, update_ms });
 
     var cgexec_args = try allocator.alloc([]const u8, args.len + 3);
     defer allocator.free(cgexec_args);
@@ -168,28 +199,33 @@ pub fn runCgroup(allocator: std.mem.Allocator, user_limits: *MemorySize, active:
             .Exited => |code| break :brk code,
             .Signal => |sig| break :brk 128 + @truncate(u8, sig),
             .Stopped => |_| {
-                std.debug.print("stopped?\n", .{});
+                std.log.warn("Process was stopped and not handled.", .{});
                 continue;
             },
             .Unknown => |unk| {
-                std.debug.print("Unknown return {}\n", .{unk});
+                std.log.err("Unknown Term, {}, from process {?}.", .{unk, child_pid});
                 return error.UnknownReturn;
             },
         }
     };
 
-    // deletion of the group causes threads to end
-    ginkgo_group.delete() catch {
-        std.debug.print(
-            "failed to delete cgroup: {s}\n",
-            .{ginkgo_group.controller_path},
-        );
-    };
+    {
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+        ctx.done = true;
+        ctx.condition.broadcast();
+
+        // deletion of the group causes threads to end
+        ginkgo_group.delete() catch {
+            std.log.warn(
+                "Failed to delete cgroup: {s}",
+                .{ginkgo_group.controller_path},
+            );
+        };
+    }
 
     oom_ctrl_thread.join();
-    if (cgroup_limiter_thread) |thread| {
-        thread.join();
-    }
+    cgroup_limiter_thread.join();
 
     return ret_code;
 }
@@ -208,27 +244,27 @@ pub fn main() !u8 {
 
     const meminfo = try MemInfo.getMemInfo();
     var byte_limit = meminfo.total - one_gig;
-    var active = false;
-    
+    var update_ms: ?u64 = null;
+
     while (true) {
         if (std.mem.eql(u8, cgroup_cmd[0], "-g")) {
             byte_limit = std.fmt.parseUnsigned(usize, cgroup_cmd[1], 10) catch {
-                std.debug.print("Invalid option '{s}' for -g\n", .{cgroup_cmd[1]});
+                std.log.err("Invalid option '{s}' for -g.", .{cgroup_cmd[1]});
                 return 1;
             };
             byte_limit *= one_gig;
             cgroup_cmd = cgroup_cmd[2..];
         } else if (std.mem.eql(u8, cgroup_cmd[0], "-a")) {
-            active = true;
+            update_ms = 1000;
             cgroup_cmd = cgroup_cmd[1..];
         } else {
             break;
         }
     }
 
-    var user_limits = MemorySize{ .rss = byte_limit, .swap = 0 };
+    const user_limits = MemorySize{ .rss = byte_limit, .swap = 0 };
 
-    var ret = try runCgroup(allocator, &user_limits, active, cgroup_cmd);
+    var ret = try runCgroup(allocator, user_limits, update_ms, cgroup_cmd);
     return ret;
 }
 

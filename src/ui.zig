@@ -30,7 +30,7 @@ const Action = enum {
 };
 
 pub fn initUI() void {
-    ray.SetTraceLogLevel(0);
+    ray.SetTraceLogLevel(5);
     ray.SetConfigFlags(ray.FLAG_WINDOW_HIDDEN);
     ray.InitWindow(window_size_x, window_size_y, "Ginkgo Swap Guard");
     ray.SetTargetFPS(30);

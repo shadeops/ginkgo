@@ -1,9 +1,14 @@
 const std = @import("std");
+const MemInfo = @import("MemInfo.zig");
 const GinkgoGroup = @import("GinkgoGroup.zig");
+
+const main = @import("main.zig");
+const Context = main.Context;
 
 const ui = @import("ui.zig");
 
-pub fn oomMonitor(cgroup: *const GinkgoGroup, pid: *const ?std.os.pid_t) !void {
+pub fn oomMonitor(ctx: *Context) !void {
+    const meminfo = try MemInfo.getMemInfo();
 
     ui.initUI();
 
@@ -13,12 +18,12 @@ pub fn oomMonitor(cgroup: *const GinkgoGroup, pid: *const ?std.os.pid_t) !void {
     const event_ctrl_path = try std.fmt.bufPrint(
         &event_ctrl_buffer,
         "{s}/{s}",
-        .{ cgroup.cgroup_path, "cgroup.event_control" },
+        .{ ctx.cgroup.cgroup_path, "cgroup.event_control" },
     );
     const oom_ctrl_path = try std.fmt.bufPrint(
         &oom_ctrl_buffer,
         "{s}/{s}",
-        .{ cgroup.cgroup_path, "memory.oom_control" },
+        .{ ctx.cgroup.cgroup_path, "memory.oom_control" },
     );
 
     var event_ctrl_fd = try std.fs.openFileAbsolute(event_ctrl_path, .{ .mode = .write_only });
@@ -41,32 +46,49 @@ pub fn oomMonitor(cgroup: *const GinkgoGroup, pid: *const ?std.os.pid_t) !void {
 
         std.fs.accessAbsolute(event_ctrl_path, .{ .mode = .write_only }) catch |err| switch (err) {
             error.FileNotFound => {
-                std.debug.print("cgroup deleted\n", .{});
+                std.log.debug("Cgroup, {s}, deleted.", .{event_ctrl_path});
                 break;
             },
             else => {
-                std.debug.print("cgroup not accessible\n", .{});
+                std.log.debug("Cgroup, {s}, not accessible.", .{event_ctrl_path});
                 return;
             },
         };
 
-        std.debug.print("OOM Event Triggered\n", .{});
         switch (ui.promptUI()) {
             .ignore => continue,
             .kill => {
-                if (pid.*) |p| try std.os.kill(p, 9);
+                if (main.child_pid) |p| try std.os.kill(p, 9);
                 break;
             },
             .kill_save => {
-                if (pid.*) |p| try std.os.kill(p, 11);
-                // provide some RAM to terminate
+                ctx.mutex.lock();
+                defer {
+                    ctx.condition.signal();
+                    ctx.mutex.unlock();
+                }
+                if (main.child_pid) |p| try std.os.kill(p, 11);
+                ctx.limits.rss = meminfo.total;
+                ctx.limits.swap = meminfo.swap_total;
                 break;
             },
             .swap => {
+                ctx.mutex.lock();
+                defer {
+                    ctx.condition.signal();
+                    ctx.mutex.unlock();
+                }
+                ctx.limits.swap += @min(2*1024*1024*1024, meminfo.swap_total);
                 continue;
             },
             .swap_all => {
-                continue;
+                ctx.mutex.lock();
+                defer {
+                    ctx.condition.signal();
+                    ctx.mutex.unlock();
+                }
+                ctx.limits.swap = meminfo.swap_total;
+                break;
             },
         }
     }

@@ -43,38 +43,15 @@ pub fn deinit(self: *GinkgoGroup) void {
 }
 
 pub fn create(self: GinkgoGroup) !void {
-    // TODO replace with libcgroup?
-    var args: [3][]const u8 = .{ "cgcreate", "-g", self.controller_path };
-
-    var proc = std.ChildProcess.init(&args, self.allocator);
-    var ret = try proc.spawnAndWait();
-    switch (ret) {
-        .Exited => |code| {
-            if (code != 0) return error.CgroupCreateFailed;
-        },
-        else => return error.CgroupCreateFailed,
-    }
+    try std.fs.makeDirAbsolute(self.cgroup_path);
 }
 
 pub fn delete(self: GinkgoGroup) !void {
-    // TODO replace with libcgroup?
-    var args: [2][]const u8 = .{ "cgdelete", self.controller_path };
-
-    var proc = std.ChildProcess.init(&args, self.allocator);
-    var ret = try proc.spawnAndWait();
-    switch (ret) {
-        .Exited => |code| {
-            if (code != 0) return error.CgroupDeleteFailed;
-        },
-        else => return error.CgroupDeleteFailed,
-    }
+    try std.fs.deleteDirAbsolute(self.cgroup_path);
 }
 
 pub fn getCgroupValue(self: GinkgoGroup, control_file: []const u8) !usize {
     // TODO: This might be too small for memory.stat
-    var mutex = std.Thread.Mutex{};
-    mutex.lock();
-    defer mutex.unlock();
     var buffer: [1024]u8 = undefined;
     var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = buf_allocator.allocator();
@@ -89,9 +66,6 @@ pub fn getCgroupValue(self: GinkgoGroup, control_file: []const u8) !usize {
 }
 
 pub fn setCgroupValue(self: GinkgoGroup, control_file: []const u8, value: usize) !void {
-    var mutex = std.Thread.Mutex{};
-    mutex.lock();
-    defer mutex.unlock();
     var buffer: [1024]u8 = undefined;
     var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = buf_allocator.allocator();
