@@ -244,7 +244,7 @@ pub fn main() !u8 {
 
     const meminfo = try MemInfo.getMemInfo();
     var byte_limit = meminfo.total - one_gig;
-    var update_ms: ?u64 = null;
+    var update_ms: ?u64 = 1000;
 
     while (true) {
         if (std.mem.eql(u8, cgroup_cmd[0], "-g")) {
@@ -254,8 +254,8 @@ pub fn main() !u8 {
             };
             byte_limit *= one_gig;
             cgroup_cmd = cgroup_cmd[2..];
-        } else if (std.mem.eql(u8, cgroup_cmd[0], "-a")) {
-            update_ms = 1000;
+        } else if (std.mem.eql(u8, cgroup_cmd[0], "-p")) {
+            update_ms = null;
             cgroup_cmd = cgroup_cmd[1..];
         } else {
             break;

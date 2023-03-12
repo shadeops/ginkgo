@@ -1,19 +1,20 @@
 const std = @import("std");
-const MemInfo = @import("MemInfo.zig");
-const GinkgoGroup = @import("GinkgoGroup.zig");
 
 const main = @import("main.zig");
-const Context = main.Context;
-
+const MemInfo = @import("MemInfo.zig");
+const GinkgoGroup = @import("GinkgoGroup.zig");
 const ui = @import("ui.zig");
 
-pub fn oomMonitor(ctx: *Context) !void {
+const buffer_size = 128;
+
+pub fn oomMonitor(ctx: *main.Context) !void {
     const meminfo = try MemInfo.getMemInfo();
 
     ui.initUI();
 
-    var event_ctrl_buffer: [256]u8 = undefined;
-    var oom_ctrl_buffer: [256]u8 = undefined;
+    var event_ctrl_buffer = [_]u8{0} ** buffer_size;
+    var oom_ctrl_buffer = [_]u8{0} ** buffer_size;
+    var line_buffer = [_]u8{0} ** buffer_size;
 
     const event_ctrl_path = try std.fmt.bufPrint(
         &event_ctrl_buffer,
@@ -26,16 +27,24 @@ pub fn oomMonitor(ctx: *Context) !void {
         .{ ctx.cgroup.cgroup_path, "memory.oom_control" },
     );
 
-    var event_ctrl_fd = try std.fs.openFileAbsolute(event_ctrl_path, .{ .mode = .write_only });
+    var event_ctrl_fd = std.fs.openFileAbsolute(event_ctrl_path, .{ .mode = .write_only }) catch {
+        std.log.err("Could not open {s}.", .{event_ctrl_path});
+        return;
+    };
     defer event_ctrl_fd.close();
 
-    var oom_ctrl_fd = try std.fs.openFileAbsolute(oom_ctrl_path, .{ .mode = .read_only });
+    var oom_ctrl_fd = std.fs.openFileAbsolute(oom_ctrl_path, .{ .mode = .read_only }) catch {
+        std.log.err("Could not open {s}.", .{oom_ctrl_path});
+        return;
+    };
     defer oom_ctrl_fd.close();
 
-    const efd = try std.os.eventfd(0, 0);
+    const efd = std.os.eventfd(0, 0) catch {
+        std.log.err("Could not create event file descriptor", .{});
+        return;
+    };
     defer std.os.close(efd);
 
-    var line_buffer = [_]u8{0} ** 128;
     var line = try std.fmt.bufPrint(&line_buffer, "{d} {d}\x00", .{ efd, oom_ctrl_fd.handle });
     _ = try event_ctrl_fd.write(line);
 
@@ -46,15 +55,16 @@ pub fn oomMonitor(ctx: *Context) !void {
 
         std.fs.accessAbsolute(event_ctrl_path, .{ .mode = .write_only }) catch |err| switch (err) {
             error.FileNotFound => {
-                std.log.debug("Cgroup, {s}, deleted.", .{event_ctrl_path});
+                std.log.debug("Cgroup, {s}, was deleted.", .{event_ctrl_path});
                 break;
             },
             else => {
                 std.log.debug("Cgroup, {s}, not accessible.", .{event_ctrl_path});
-                return;
+                break;
             },
         };
 
+        std.log.debug("OOM Monitor Triggered", .{});
         switch (ui.promptUI()) {
             .ignore => continue,
             .kill => {
@@ -92,4 +102,5 @@ pub fn oomMonitor(ctx: *Context) !void {
             },
         }
     }
+    std.log.debug("oomMonitor thread has stopped", .{});
 }
