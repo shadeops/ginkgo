@@ -21,7 +21,7 @@ pub fn sig_handler(sig: c_int) align(1) callconv(.C) void {
         std.os.kill(pid, @intCast(u8, sig)) catch {
             std.log.warn("Failed to kill child process [{}].", .{pid});
         };
-        std.log.info("Pid {} has been killed with signal {}.", .{pid, @intCast(u8, sig)});
+        std.log.info("Pid {} has been killed with signal {}.", .{ pid, @intCast(u8, sig) });
     }
 }
 
@@ -63,16 +63,14 @@ fn cgroupMemLimiter(
     ctx: *const Context,
     update_freq_ms: ?usize,
 ) !void {
-
     var swappiness = ctx.limits.swap > 0;
 
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
 
     while (!ctx.done) {
-
         if (update_freq_ms) |timeout| {
-            ctx.condition.timedWait(ctx.mutex, timeout*std.time.ns_per_ms) catch {};
+            ctx.condition.timedWait(ctx.mutex, timeout * std.time.ns_per_ms) catch {};
         } else {
             ctx.condition.wait(ctx.mutex);
         }
@@ -139,7 +137,38 @@ fn cgroupMemLimiter(
     std.log.debug("cgroupMemLimiter thread has stopped.", .{});
 }
 
-pub fn runCgroup(allocator: std.mem.Allocator, user_limits: MemorySize, update_ms: ?u64, args: [][]const u8) !u8 {
+pub fn evictProcs(allocator: std.mem.Allocator, cgroup: *const GinkgoGroup) !void {
+    var proc_path = try std.fs.path.join(allocator, &.{cgroup.cgroup_path, "cgroup.procs"});
+    defer allocator.free(proc_path);
+
+    var parent_procs = try std.fs.openFileAbsolute("/sys/fs/cgroup/memory/ginkgo/cgroup.procs", .{.mode=.write_only});
+    defer parent_procs.close();
+
+    var procs = try std.fs.openFileAbsolute(proc_path, .{.mode=.read_only});
+    defer procs.close();
+
+    // We use this because the proc ids may be duplicated.
+    var proc_set = std.StringHashMap(void).init(allocator);
+    defer proc_set.deinit();
+
+    var writer = parent_procs.writer();
+    var contents = try procs.readToEndAlloc(allocator, 1024*1024);
+    defer allocator.free(contents);
+    var line_iter = std.mem.tokenize(u8, contents, "\n");
+    while (line_iter.next()) |line| {
+        try proc_set.putNoClobber(line, {});
+        _ = try writer.write(line);
+        std.log.debug("Migrating {s}", .{line});
+    }
+}
+
+pub fn runCgroup(
+    allocator: std.mem.Allocator,
+    user_limits: MemorySize,
+    update_ms: ?u64,
+    evict: bool,
+    args: [][]const u8,
+) !u8 {
     var ginkgo_group = try GinkgoGroup.init(allocator);
     defer ginkgo_group.deinit();
 
@@ -167,7 +196,7 @@ pub fn runCgroup(allocator: std.mem.Allocator, user_limits: MemorySize, update_m
     try ginkgo_group.setCgroupValue("memory.oom_control", 1);
     try ginkgo_group.setCgroupValue("memory.swappiness", 0);
 
-    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{ &ctx });
+    var oom_ctrl_thread = try std.Thread.spawn(.{}, oom_monitor.oomMonitor, .{&ctx});
     var cgroup_limiter_thread = try std.Thread.spawn(.{}, cgroupMemLimiter, .{ &ctx, update_ms });
 
     var cgexec_args = try allocator.alloc([]const u8, args.len + 3);
@@ -203,11 +232,15 @@ pub fn runCgroup(allocator: std.mem.Allocator, user_limits: MemorySize, update_m
                 continue;
             },
             .Unknown => |unk| {
-                std.log.err("Unknown Term, {}, from process {?}.", .{unk, child_pid});
+                std.log.err("Unknown Term, {}, from process {?}.", .{ unk, child_pid });
                 return error.UnknownReturn;
             },
         }
     };
+
+    if (evict) {
+        try evictProcs(allocator, &ginkgo_group);
+    }
 
     {
         ctx.mutex.lock();
@@ -245,6 +278,7 @@ pub fn main() !u8 {
     const meminfo = try MemInfo.getMemInfo();
     var byte_limit = meminfo.total - one_gig;
     var update_ms: ?u64 = 1000;
+    var evict = true;
 
     while (true) {
         if (std.mem.eql(u8, cgroup_cmd[0], "-g")) {
@@ -257,6 +291,9 @@ pub fn main() !u8 {
         } else if (std.mem.eql(u8, cgroup_cmd[0], "-p")) {
             update_ms = null;
             cgroup_cmd = cgroup_cmd[1..];
+        } else if (std.mem.eql(u8, cgroup_cmd[0], "-k")) {
+            evict = false;
+            cgroup_cmd = cgroup_cmd[1..];
         } else {
             break;
         }
@@ -264,7 +301,7 @@ pub fn main() !u8 {
 
     const user_limits = MemorySize{ .rss = byte_limit, .swap = 0 };
 
-    var ret = try runCgroup(allocator, user_limits, update_ms, cgroup_cmd);
+    var ret = try runCgroup(allocator, user_limits, update_ms, evict, cgroup_cmd);
     return ret;
 }
 

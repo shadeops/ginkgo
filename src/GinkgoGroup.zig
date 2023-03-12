@@ -56,7 +56,7 @@ pub fn getCgroupValue(self: GinkgoGroup, control_file: []const u8) !usize {
     var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = buf_allocator.allocator();
 
-    var path = try std.mem.join(allocator, "/", &.{ self.cgroup_path, control_file });
+    var path = try std.fs.path.join(allocator, &.{ self.cgroup_path, control_file });
     var handle = try std.fs.openFileAbsolute(path, .{});
     defer handle.close();
 
@@ -70,7 +70,7 @@ pub fn setCgroupValue(self: GinkgoGroup, control_file: []const u8, value: usize)
     var buf_allocator = std.heap.FixedBufferAllocator.init(&buffer);
     const allocator = buf_allocator.allocator();
 
-    var path = try std.mem.join(allocator, "/", &.{ self.cgroup_path, control_file });
+    var path = try std.fs.path.join(allocator, &.{ self.cgroup_path, control_file });
     var handle = try std.fs.openFileAbsolute(path, .{ .mode = .write_only });
     defer handle.close();
     var value_str = try std.fmt.bufPrint(&buffer, "{}", .{value});

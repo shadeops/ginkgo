@@ -88,7 +88,7 @@ pub fn oomMonitor(ctx: *main.Context) !void {
                     ctx.condition.signal();
                     ctx.mutex.unlock();
                 }
-                ctx.limits.swap += @min(2*1024*1024*1024, meminfo.swap_total);
+                ctx.limits.swap += @min(2 * 1024 * 1024 * 1024, meminfo.swap_total);
                 continue;
             },
             .swap_all => {
