@@ -138,13 +138,13 @@ fn cgroupMemLimiter(
 }
 
 pub fn evictProcs(allocator: std.mem.Allocator, cgroup: *const GinkgoGroup) !void {
-    var proc_path = try std.fs.path.join(allocator, &.{cgroup.cgroup_path, "cgroup.procs"});
+    var proc_path = try std.fs.path.join(allocator, &.{ cgroup.cgroup_path, "cgroup.procs" });
     defer allocator.free(proc_path);
 
-    var parent_procs = try std.fs.openFileAbsolute("/sys/fs/cgroup/memory/ginkgo/cgroup.procs", .{.mode=.write_only});
+    var parent_procs = try std.fs.openFileAbsolute("/sys/fs/cgroup/memory/ginkgo/cgroup.procs", .{ .mode = .write_only });
     defer parent_procs.close();
 
-    var procs = try std.fs.openFileAbsolute(proc_path, .{.mode=.read_only});
+    var procs = try std.fs.openFileAbsolute(proc_path, .{ .mode = .read_only });
     defer procs.close();
 
     // We use this because the proc ids may be duplicated.
@@ -152,7 +152,7 @@ pub fn evictProcs(allocator: std.mem.Allocator, cgroup: *const GinkgoGroup) !voi
     defer proc_set.deinit();
 
     var writer = parent_procs.writer();
-    var contents = try procs.readToEndAlloc(allocator, 1024*1024);
+    var contents = try procs.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(contents);
     var line_iter = std.mem.tokenize(u8, contents, "\n");
     while (line_iter.next()) |line| {
@@ -273,6 +273,11 @@ pub fn main() !u8 {
     var args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (args.len <= 1) {
+        std.log.err("No command passed to {s}", .{args[0]});
+        return 1;
+    }
+
     var cgroup_cmd = args[1..];
 
     const meminfo = try MemInfo.getMemInfo();
@@ -280,7 +285,7 @@ pub fn main() !u8 {
     var update_ms: ?u64 = 1000;
     var evict = true;
 
-    while (true) {
+    while (cgroup_cmd.len != 0) {
         if (std.mem.eql(u8, cgroup_cmd[0], "-g")) {
             byte_limit = std.fmt.parseUnsigned(usize, cgroup_cmd[1], 10) catch {
                 std.log.err("Invalid option '{s}' for -g.", .{cgroup_cmd[1]});
@@ -297,6 +302,11 @@ pub fn main() !u8 {
         } else {
             break;
         }
+    }
+
+    if (cgroup_cmd.len == 0) {
+        std.log.err("No command passed to {s}", .{args[0]});
+        return 1;
     }
 
     const user_limits = MemorySize{ .rss = byte_limit, .swap = 0 };
