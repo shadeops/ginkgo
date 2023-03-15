@@ -43,10 +43,12 @@ pub fn deinit(self: *GinkgoGroup) void {
 }
 
 pub fn create(self: GinkgoGroup) !void {
+    std.log.debug("Creating {s}", .{self.cgroup_path});
     try std.fs.makeDirAbsolute(self.cgroup_path);
 }
 
 pub fn delete(self: GinkgoGroup) !void {
+    std.log.debug("Deleting {s}", .{self.cgroup_path});
     try std.fs.deleteDirAbsolute(self.cgroup_path);
 }
 

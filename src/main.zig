@@ -8,22 +8,21 @@ const one_gig = 1024 * 1024 * 1024;
 
 pub var child_pid: ?std.os.pid_t = null;
 
-// Note: If we Ctrl+C in the shell, it sends a SIGINT to the entire process group.
+// Note: If we Ctrl+C (or +\) in the shell, it sends a signal to the entire process group.
 //  meaning our child process is interrupted and our cgroup is cleaned up, however
 //  this is not the case for a killall -INT ginkgo
+// TODO It would be nice to trap a Ctrl+C or Ctrl+\, and have it raise the Ginkgo UI
+//      but to do so we would need to block the signals from going to the child proc
+//      NOTE: man 2 execve
+//        All process attributes are preserved during an execve(), except the following:
+//           *  The dispositions of any signals that are being caught are reset to the default (signal(7)).
+//           *  Any alternate signal stack is not preserved (sigaltstack(2)).
+//      This means we can't block the shell's Ctrl+C
 const handled_signals = [_]c_int{
     std.os.SIG.INT,
+    std.os.SIG.QUIT,
     std.os.SIG.TERM,
 };
-
-pub fn sig_handler(sig: c_int) align(1) callconv(.C) void {
-    if (child_pid) |pid| {
-        std.os.kill(pid, @intCast(u8, sig)) catch {
-            std.log.warn("Failed to kill child process [{}].", .{pid});
-        };
-        std.log.info("Pid {} has been killed with signal {}.", .{ pid, @intCast(u8, sig) });
-    }
-}
 
 pub const MemorySize = struct {
     rss: usize,
@@ -38,12 +37,21 @@ pub const Context = struct {
     cgroup: *const GinkgoGroup,
     mutex: *std.Thread.Mutex,
     condition: *std.Thread.Condition,
-    limits: MemorySize,
+    limits: *MemorySize,
     done: bool = false,
 };
 
+fn sig_handler(sig: c_int) align(1) callconv(.C) void {
+    if (child_pid) |pid| {
+        std.os.kill(pid, @intCast(u8, sig)) catch {
+            std.log.warn("Failed to kill child process [{}].", .{pid});
+        };
+        std.log.info("Pid {} has been killed with signal {}.", .{ pid, @intCast(u8, sig) });
+    }
+}
+
 fn computeLimits(
-    allowed_limits: MemorySize,
+    allowed_limits: *const MemorySize,
     current_usage: MemorySize,
 ) !MemorySize {
     const meminfo = try MemInfo.getMemInfo();
@@ -172,6 +180,15 @@ pub fn runCgroup(
     var ginkgo_group = try GinkgoGroup.init(allocator);
     defer ginkgo_group.deinit();
 
+    const sig_action = std.os.Sigaction{
+        .handler = .{ .handler = sig_handler },
+        .mask = std.os.empty_sigset,
+        .flags = 0,
+    };
+    for (&handled_signals) |signal| {
+        try std.os.sigaction(@intCast(u6, signal), &sig_action, null);
+    }
+
     try ginkgo_group.create();
     errdefer ginkgo_group.delete() catch {
         std.log.warn(
@@ -182,12 +199,13 @@ pub fn runCgroup(
 
     var mutex = std.Thread.Mutex{};
     var condition = std.Thread.Condition{};
+    var limits = user_limits;
 
     var ctx = Context{
         .cgroup = &ginkgo_group,
         .mutex = &mutex,
         .condition = &condition,
-        .limits = user_limits,
+        .limits = &limits,
     };
 
     // Since we are shrinking from the max defaults, memory goes before memsw
@@ -201,15 +219,6 @@ pub fn runCgroup(
 
     var cgexec_args = try allocator.alloc([]const u8, args.len + 3);
     defer allocator.free(cgexec_args);
-
-    const sig_action = std.os.Sigaction{
-        .handler = .{ .handler = sig_handler },
-        .mask = std.os.empty_sigset,
-        .flags = 0,
-    };
-    for (&handled_signals) |signal| {
-        try std.os.sigaction(@intCast(u6, signal), &sig_action, null);
-    }
 
     cgexec_args[0] = "cgexec";
     cgexec_args[1] = "-g";

@@ -7,7 +7,7 @@ const ui = @import("ui.zig");
 
 const buffer_size = 128;
 
-pub fn oomMonitor(ctx: *main.Context) !void {
+pub fn oomMonitor(ctx: *const main.Context) !void {
     const meminfo = try MemInfo.getMemInfo();
 
     ui.initUI();
