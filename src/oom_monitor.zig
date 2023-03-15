@@ -68,7 +68,12 @@ pub fn oomMonitor(ctx: *const main.Context) !void {
         switch (ui.promptUI()) {
             .ignore => continue,
             .kill => {
-                if (main.child_pid) |p| try std.os.kill(p, 9);
+                if (main.child_pid) |p| {
+                    std.log.debug("Killing {} with signal 9", .{p});
+                    std.os.kill(p, 9) catch |err| {
+                        std.log.warn("Failed to kill 9 {}, {}", .{p, err});
+                    };
+                }
                 break;
             },
             .kill_save => {
@@ -77,7 +82,12 @@ pub fn oomMonitor(ctx: *const main.Context) !void {
                     ctx.condition.signal();
                     ctx.mutex.unlock();
                 }
-                if (main.child_pid) |p| try std.os.kill(p, 11);
+                if (main.child_pid) |p| {
+                    std.log.debug("Killing {} with signal 11", .{p});
+                    std.os.kill(p, 11) catch |err| {
+                        std.log.warn("Failed to kill 11 {}, {}", .{p, err});
+                    };
+                }
                 ctx.limits.rss = meminfo.total;
                 ctx.limits.swap = meminfo.swap_total;
                 break;
